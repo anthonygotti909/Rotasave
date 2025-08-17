@@ -16,6 +16,13 @@
 (define-constant ERR_CYCLE_NOT_COMPLETED (err u114))
 (define-constant ERR_NOT_CYCLE_PARTICIPANT (err u115))
 (define-constant ERR_PENALTY_NOT_FOUND (err u116))
+(define-constant ERR_EMERGENCY_NOT_FOUND (err u117))
+(define-constant ERR_EMERGENCY_ALREADY_EXISTS (err u118))
+(define-constant ERR_EMERGENCY_CLOSED (err u119))
+(define-constant ERR_ALREADY_VOTED (err u120))
+(define-constant ERR_VOTING_ENDED (err u121))
+(define-constant ERR_INSUFFICIENT_EMERGENCY_FUNDS (err u122))
+(define-constant ERR_EMERGENCY_NOT_APPROVED (err u123))
 
 (define-data-var cycle-counter uint u0)
 
@@ -89,6 +96,44 @@
   {
     minimum-trust-score: uint,
     require-previous-cycles: uint
+  }
+)
+
+(define-data-var emergency-counter uint u0)
+
+(define-map emergency-funds
+  { cycle-id: uint }
+  {
+    total-balance: uint,
+    active-requests: uint
+  }
+)
+
+(define-map emergency-contributions
+  { cycle-id: uint, contributor: principal }
+  { amount: uint, last-contribution: uint }
+)
+
+(define-map emergency-requests
+  { cycle-id: uint, request-id: uint }
+  {
+    requester: principal,
+    amount-requested: uint,
+    reason: (string-ascii 500),
+    created-block: uint,
+    voting-deadline: uint,
+    status: (string-ascii 20),
+    yes-votes: uint,
+    no-votes: uint,
+    total-eligible-voters: uint
+  }
+)
+
+(define-map emergency-votes
+  { cycle-id: uint, request-id: uint, voter: principal }
+  {
+    vote: bool,
+    timestamp: uint
   }
 )
 
@@ -480,6 +525,181 @@
   )
 )
 
+(define-public (contribute-to-emergency-fund (cycle-id uint) (amount uint))
+  (let
+    (
+      (cycle-data (unwrap! (map-get? cycles cycle-id) ERR_CYCLE_NOT_FOUND))
+      (participant-data (unwrap! (map-get? cycle-participants { cycle-id: cycle-id, participant: tx-sender }) ERR_NOT_PARTICIPANT))
+      (current-fund (default-to { total-balance: u0, active-requests: u0 } (map-get? emergency-funds { cycle-id: cycle-id })))
+      (current-contrib (default-to { amount: u0, last-contribution: u0 } (map-get? emergency-contributions { cycle-id: cycle-id, contributor: tx-sender })))
+    )
+    (asserts! (> amount u0) ERR_NOT_AUTHORIZED)
+    
+    (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+    
+    (map-set emergency-funds
+      { cycle-id: cycle-id }
+      {
+        total-balance: (+ (get total-balance current-fund) amount),
+        active-requests: (get active-requests current-fund)
+      }
+    )
+    
+    (map-set emergency-contributions
+      { cycle-id: cycle-id, contributor: tx-sender }
+      {
+        amount: (+ (get amount current-contrib) amount),
+        last-contribution: stacks-block-height
+      }
+    )
+    
+    (ok amount)
+  )
+)
+
+(define-public (request-emergency-fund (cycle-id uint) (amount uint) (reason (string-ascii 500)))
+  (let
+    (
+      (cycle-data (unwrap! (map-get? cycles cycle-id) ERR_CYCLE_NOT_FOUND))
+      (participant-data (unwrap! (map-get? cycle-participants { cycle-id: cycle-id, participant: tx-sender }) ERR_NOT_PARTICIPANT))
+      (fund-data (default-to { total-balance: u0, active-requests: u0 } (map-get? emergency-funds { cycle-id: cycle-id })))
+      (request-id (+ (var-get emergency-counter) u1))
+      (voting-period u144)
+    )
+    (asserts! (> amount u0) ERR_NOT_AUTHORIZED)
+    (asserts! (<= amount (get total-balance fund-data)) ERR_INSUFFICIENT_EMERGENCY_FUNDS)
+    (asserts! (is-none (map-get? emergency-requests { cycle-id: cycle-id, request-id: request-id })) ERR_EMERGENCY_ALREADY_EXISTS)
+    
+    (map-set emergency-requests
+      { cycle-id: cycle-id, request-id: request-id }
+      {
+        requester: tx-sender,
+        amount-requested: amount,
+        reason: reason,
+        created-block: stacks-block-height,
+        voting-deadline: (+ stacks-block-height voting-period),
+        status: "voting",
+        yes-votes: u0,
+        no-votes: u0,
+        total-eligible-voters: (get current-participants cycle-data)
+      }
+    )
+    
+    (map-set emergency-funds
+      { cycle-id: cycle-id }
+      (merge fund-data { active-requests: (+ (get active-requests fund-data) u1) })
+    )
+    
+    (var-set emergency-counter request-id)
+    (ok request-id)
+  )
+)
+
+(define-public (vote-on-emergency (cycle-id uint) (request-id uint) (vote bool))
+  (let
+    (
+      (cycle-data (unwrap! (map-get? cycles cycle-id) ERR_CYCLE_NOT_FOUND))
+      (participant-data (unwrap! (map-get? cycle-participants { cycle-id: cycle-id, participant: tx-sender }) ERR_NOT_PARTICIPANT))
+      (request-data (unwrap! (map-get? emergency-requests { cycle-id: cycle-id, request-id: request-id }) ERR_EMERGENCY_NOT_FOUND))
+    )
+    (asserts! (is-eq (get status request-data) "voting") ERR_EMERGENCY_CLOSED)
+    (asserts! (<= stacks-block-height (get voting-deadline request-data)) ERR_VOTING_ENDED)
+    (asserts! (is-none (map-get? emergency-votes { cycle-id: cycle-id, request-id: request-id, voter: tx-sender })) ERR_ALREADY_VOTED)
+    
+    (map-set emergency-votes
+      { cycle-id: cycle-id, request-id: request-id, voter: tx-sender }
+      {
+        vote: vote,
+        timestamp: stacks-block-height
+      }
+    )
+    
+    (let
+      (
+        (new-yes-votes (if vote (+ (get yes-votes request-data) u1) (get yes-votes request-data)))
+        (new-no-votes (if vote (get no-votes request-data) (+ (get no-votes request-data) u1)))
+      )
+      (map-set emergency-requests
+        { cycle-id: cycle-id, request-id: request-id }
+        (merge request-data 
+          {
+            yes-votes: new-yes-votes,
+            no-votes: new-no-votes
+          }
+        )
+      )
+      (ok true)
+    )
+  )
+)
+
+(define-public (finalize-emergency-request (cycle-id uint) (request-id uint))
+  (let
+    (
+      (request-data (unwrap! (map-get? emergency-requests { cycle-id: cycle-id, request-id: request-id }) ERR_EMERGENCY_NOT_FOUND))
+      (fund-data (unwrap! (map-get? emergency-funds { cycle-id: cycle-id }) ERR_EMERGENCY_NOT_FOUND))
+    )
+    (asserts! (is-eq (get status request-data) "voting") ERR_EMERGENCY_CLOSED)
+    (asserts! (> stacks-block-height (get voting-deadline request-data)) ERR_VOTING_ENDED)
+    
+    (let
+      (
+        (total-votes (+ (get yes-votes request-data) (get no-votes request-data)))
+        (majority-threshold (/ (get total-eligible-voters request-data) u2))
+        (approval-threshold (/ (* (get yes-votes request-data) u100) total-votes))
+        (is-approved (and (>= total-votes majority-threshold) (>= approval-threshold u60)))
+      )
+      (if is-approved
+        (begin
+          (map-set emergency-requests
+            { cycle-id: cycle-id, request-id: request-id }
+            (merge request-data { status: "approved" })
+          )
+          
+          (try! (as-contract (stx-transfer? (get amount-requested request-data) tx-sender (get requester request-data))))
+          
+          (map-set emergency-funds
+            { cycle-id: cycle-id }
+            {
+              total-balance: (- (get total-balance fund-data) (get amount-requested request-data)),
+              active-requests: (- (get active-requests fund-data) u1)
+            }
+          )
+          (ok "approved")
+        )
+        (begin
+          (map-set emergency-requests
+            { cycle-id: cycle-id, request-id: request-id }
+            (merge request-data { status: "rejected" })
+          )
+          
+          (map-set emergency-funds
+            { cycle-id: cycle-id }
+            (merge fund-data { active-requests: (- (get active-requests fund-data) u1) })
+          )
+          (ok "rejected")
+        )
+      )
+    )
+  )
+)
+
+(define-read-only (get-emergency-fund-balance (cycle-id uint))
+  (get total-balance (default-to { total-balance: u0, active-requests: u0 } (map-get? emergency-funds { cycle-id: cycle-id })))
+)
+
+(define-read-only (get-emergency-contribution (cycle-id uint) (contributor principal))
+  (map-get? emergency-contributions { cycle-id: cycle-id, contributor: contributor })
+)
+
+(define-read-only (get-emergency-request (cycle-id uint) (request-id uint))
+  (map-get? emergency-requests { cycle-id: cycle-id, request-id: request-id })
+)
+
+(define-read-only (get-emergency-vote (cycle-id uint) (request-id uint) (voter principal))
+  (map-get? emergency-votes { cycle-id: cycle-id, request-id: request-id, voter: voter })
+)
+
 (define-read-only (get-user-reputation (user principal))
   (default-to 
     { total-rating-score: u0, total-ratings-received: u0, completed-cycles: u0, defaulted-cycles: u0, trust-score: u500, last-updated: u0 }
@@ -524,3 +744,6 @@
     count
   )
 )
+
+
+
