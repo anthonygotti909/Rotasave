@@ -1,0 +1,23 @@
+[project]
+name = 'Rotasave'
+description = ''
+authors = []
+telemetry = true
+cache_dir = '.\.cache'
+requirements = []
+[contracts.Rotasave]
+path = 'contracts/Rotasave.clar'
+clarity_version = 3
+epoch = 3.1
+[contracts.savings-goals]
+path = 'contracts/savings-goals.clar'
+clarity_version = 3
+epoch = 3.1
+[repl.analysis]
+passes = ['check_checker']
+
+[repl.analysis.check_checker]
+strict = false
+trusted_sender = false
+trusted_caller = false
+callee_filter = false
