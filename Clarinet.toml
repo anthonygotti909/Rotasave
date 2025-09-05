@@ -9,6 +9,10 @@ requirements = []
 path = 'contracts/Rotasave.clar'
 clarity_version = 3
 epoch = 3.1
+[contracts.savings-goals]
+path = 'contracts/savings-goals.clar'
+clarity_version = 3
+epoch = 3.1
 [repl.analysis]
 passes = ['check_checker']
 
